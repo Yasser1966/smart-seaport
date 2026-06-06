@@ -1,0 +1,177 @@
+
+networks:
+  seaport-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  keycloak-data:
+  openremote-data:
+  mosquitto-data:
+  mosquitto-log:
+
+services:
+
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: seaport-nginx
+    ports:
+      - "8080:80"
+    volumes:
+      - ./configs/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./configs/nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - frontend
+      - manager
+      - ai-service
+    networks:
+      - seaport-net
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend/portal
+      dockerfile: Dockerfile
+    container_name: seaport-frontend
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      NEXT_PUBLIC_MANAGER_URL: ${NEXT_PUBLIC_MANAGER_URL:-http://localhost/api}
+      NEXT_PUBLIC_KEYCLOAK_URL: ${NEXT_PUBLIC_KEYCLOAK_URL:-http://localhost/auth}
+      NEXT_PUBLIC_AI_URL: ${NEXT_PUBLIC_AI_URL:-http://localhost/ai}
+      NEXT_PUBLIC_MQTT_URL: ${NEXT_PUBLIC_MQTT_URL:-ws://localhost/mqtt}
+    depends_on:
+      - postgres
+      - keycloak
+    networks:
+      - seaport-net
+    restart: unless-stopped
+
+  manager:
+    image: openremote/manager:latest
+    container_name: seaport-manager
+    expose:
+      - "8080"
+      - "8083"
+    environment:
+      OR_ADMIN_PASSWORD: ${OR_ADMIN_PASSWORD:-secret}
+      OR_SETUP_RUN_ON_RESTART: "false"
+      OR_HOSTNAME: ${OR_HOSTNAME:-localhost}
+      OR_SSL_PORT: "-1"
+      OR_DEV_MODE: ${OR_DEV_MODE:-false}
+      OR_DB_VENDOR: postgres
+      OR_DB_HOST: postgres
+      OR_DB_PORT: 5432
+      OR_DB_NAME: ${POSTGRES_DB:-openremote}
+      OR_DB_USER: ${POSTGRES_USER:-openremote}
+      OR_DB_PASSWORD: ${POSTGRES_PASSWORD:-openremote}
+      OR_KEYCLOAK_HOST: keycloak
+      OR_KEYCLOAK_PORT: 8080
+      OR_MQTT_HOST: mosquitto
+      OR_MQTT_PORT: 1883
+    depends_on:
+      - postgres
+      - keycloak
+      - mosquitto
+    volumes:
+      - openremote-data:/deployment
+    networks:
+      - seaport-net
+    restart: unless-stopped
+
+  ai-service:
+    build:
+      context: ./ai-service
+      dockerfile: Dockerfile
+    container_name: seaport-ai
+    expose:
+      - "8000"
+    environment:
+      APP_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${AI_LOG_LEVEL:-info}
+      MANAGER_URL: http://manager:8080
+      MANAGER_CLIENT_ID: ${OR_MANAGER_CLIENT_ID:-seaport-ai}
+      MANAGER_CLIENT_SECRET: ${OR_MANAGER_CLIENT_SECRET:-change-me}
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_USERNAME: ${MQTT_USERNAME:-ai-service}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-change-me}
+      MQTT_TOPIC_GATES: seaport/gates/#
+      MQTT_TOPIC_CAMERAS: seaport/cameras/#
+      MQTT_TOPIC_VESSELS: seaport/vessels/#
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-openremote}
+      DB_USER: ${POSTGRES_USER:-openremote}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-openremote}
+      MODEL_DIR: /app/models
+    volumes:
+      - ./ai-service:/app
+      - ./ai-service/models:/app/models
+    depends_on:
+      - postgres
+      - mosquitto
+      - manager
+    networks:
+      - seaport-net
+    restart: unless-stopped
+
+  postgres:
+    image: postgis/postgis:15-3.4-alpine
+    container_name: seaport-postgres
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-openremote}
+      POSTGRES_USER: ${POSTGRES_USER:-openremote}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-openremote}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - seaport-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-openremote}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mosquitto:
+    image: eclipse-mosquitto:2.0
+    container_name: seaport-mosquitto
+    expose:
+      - "1883"
+      - "9001"
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    networks:
+      - seaport-net
+    restart: unless-stopped
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:24.0
+    container_name: seaport-keycloak
+    command: start --hostname-strict=false --http-enabled=true --proxy=edge
+    expose:
+      - "8080"
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-openremote}
+      KC_DB_USERNAME: ${POSTGRES_USER:-openremote}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD:-openremote}
+      KC_HTTP_PORT: 8080
+      KC_HOSTNAME_URL: ${KEYCLOAK_HOSTNAME_URL:-http://localhost/auth}
+      KC_HOSTNAME_ADMIN_URL: ${KEYCLOAK_HOSTNAME_URL:-http://localhost/auth}
+    depends_on:
+      - postgres
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+    networks:
+      - seaport-net
+    restart: unless-stopped
